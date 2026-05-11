@@ -66,6 +66,8 @@ def estimate_tokens(messages: list) -> int:
 
 
 # -- Layer 1: micro_compact - replace old tool results with placeholders --
+
+
 def micro_compact(messages: list) -> list:
     # Collect (msg_index, part_index, tool_result_dict) for all tool_result entries
     tool_results = []
@@ -100,6 +102,8 @@ def micro_compact(messages: list) -> list:
 
 
 # -- Layer 2: auto_compact - save transcript, summarize, replace messages --
+
+
 def auto_compact(messages: list) -> list:
     # Save full transcript to disk
     TRANSCRIPT_DIR.mkdir(exist_ok=True)
@@ -113,9 +117,9 @@ def auto_compact(messages: list) -> list:
     response = client.messages.create(
         model=MODEL,
         messages=[{"role": "user", "content":
-            "Summarize this conversation for continuity. Include: "
-            "1) What was accomplished, 2) Current state, 3) Key decisions made. "
-            "Be concise but preserve critical details.\n\n" + conversation_text}],
+                   "Summarize this conversation for continuity. Include: "
+                   "1) What was accomplished, 2) Current state, 3) Key decisions made. "
+                   "Be concise but preserve critical details.\n\n" + conversation_text}],
         max_tokens=2000,
     )
     summary = next((block.text for block in response.content if hasattr(block, "text")), "")
@@ -128,11 +132,14 @@ def auto_compact(messages: list) -> list:
 
 
 # -- Tool implementations --
+
+
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
+
 
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
@@ -146,6 +153,7 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
+
 def run_read(path: str, limit: int = None) -> str:
     try:
         lines = safe_path(path).read_text().splitlines()
@@ -155,6 +163,7 @@ def run_read(path: str, limit: int = None) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+
 def run_write(path: str, content: str) -> str:
     try:
         fp = safe_path(path)
@@ -163,6 +172,7 @@ def run_write(path: str, content: str) -> str:
         return f"Wrote {len(content)} bytes"
     except Exception as e:
         return f"Error: {e}"
+
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:

@@ -244,11 +244,11 @@ def create_agent(name: str, level: int, output_dir: Path):
     print(f"Created: {gitignore}")
 
     print(f"\nAgent '{name}' created at {agent_dir}")
-    print(f"\nNext steps:")
-    print(f"  1. cd {agent_dir}")
-    print(f"  2. cp .env.example .env")
-    print(f"  3. Edit .env with your API key")
-    print(f"  4. pip install anthropic python-dotenv")
+    print("\nNext steps:")
+    print("  1. cd " + str(agent_dir))
+    print("  2. cp .env.example .env")
+    print("  3. Edit .env with your API key")
+    print("  4. pip install anthropic python-dotenv")
     print(f"  5. python {name}.py")
 
 
@@ -267,9 +267,9 @@ Levels:
     )
     parser.add_argument("name", help="Name of the agent to create")
     parser.add_argument("--level", type=int, default=1, choices=[0, 1, 2, 3, 4],
-                       help="Complexity level (default: 1)")
+                        help="Complexity level (default: 1)")
     parser.add_argument("--path", type=Path, default=Path.cwd(),
-                       help="Output directory (default: current directory)")
+                        help="Output directory (default: current directory)")
 
     args = parser.parse_args()
     create_agent(args.name, args.level, args.path)

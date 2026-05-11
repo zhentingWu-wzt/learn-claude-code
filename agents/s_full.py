@@ -71,11 +71,14 @@ VALID_MSG_TYPES = {"message", "broadcast", "shutdown_request",
 
 
 # === SECTION: base_tools ===
+
+
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
+
 
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
@@ -89,6 +92,7 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
+
 def run_read(path: str, limit: int = None) -> str:
     try:
         lines = safe_path(path).read_text().splitlines()
@@ -98,6 +102,7 @@ def run_read(path: str, limit: int = None) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+
 def run_write(path: str, content: str) -> str:
     try:
         fp = safe_path(path)
@@ -106,6 +111,7 @@ def run_write(path: str, content: str) -> str:
         return f"Wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error: {e}"
+
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
@@ -120,6 +126,8 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 
 # === SECTION: todos (s03) ===
+
+
 class TodoManager:
     def __init__(self):
         self.items = []
@@ -130,19 +138,25 @@ class TodoManager:
             content = str(item.get("content", "")).strip()
             status = str(item.get("status", "pending")).lower()
             af = str(item.get("activeForm", "")).strip()
-            if not content: raise ValueError(f"Item {i}: content required")
+            if not content:
+                raise ValueError(f"Item {i}: content required")
             if status not in ("pending", "in_progress", "completed"):
                 raise ValueError(f"Item {i}: invalid status '{status}'")
-            if not af: raise ValueError(f"Item {i}: activeForm required")
-            if status == "in_progress": ip += 1
+            if not af:
+                raise ValueError(f"Item {i}: activeForm required")
+            if status == "in_progress":
+                ip += 1
             validated.append({"content": content, "status": status, "activeForm": af})
-        if len(validated) > 20: raise ValueError("Max 20 todos")
-        if ip > 1: raise ValueError("Only one in_progress allowed")
+        if len(validated) > 20:
+            raise ValueError("Max 20 todos")
+        if ip > 1:
+            raise ValueError("Only one in_progress allowed")
         self.items = validated
         return self.render()
 
     def render(self) -> str:
-        if not self.items: return "No todos."
+        if not self.items:
+            return "No todos."
         lines = []
         for item in self.items:
             m = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]"}.get(item["status"], "[?]")
@@ -157,6 +171,8 @@ class TodoManager:
 
 
 # === SECTION: subagent (s04) ===
+
+
 def run_subagent(prompt: str, agent_type: str = "Explore") -> str:
     sub_tools = [
         {"name": "bash", "description": "Run command.",
@@ -196,6 +212,8 @@ def run_subagent(prompt: str, agent_type: str = "Explore") -> str:
 
 
 # === SECTION: skills (s05) ===
+
+
 class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills = {}
@@ -214,18 +232,23 @@ class SkillLoader:
                 self.skills[name] = {"meta": meta, "body": body}
 
     def descriptions(self) -> str:
-        if not self.skills: return "(no skills)"
+        if not self.skills:
+            return "(no skills)"
         return "\n".join(f"  - {n}: {s['meta'].get('description', '-')}" for n, s in self.skills.items())
 
     def load(self, name: str) -> str:
         s = self.skills.get(name)
-        if not s: return f"Error: Unknown skill '{name}'. Available: {', '.join(self.skills.keys())}"
+        if not s:
+            return f"Error: Unknown skill '{name}'. Available: {', '.join(self.skills.keys())}"
         return f"<skill name=\"{name}\">\n{s['body']}\n</skill>"
 
 
 # === SECTION: compression (s06) ===
+
+
 def estimate_tokens(messages: list) -> int:
     return len(json.dumps(messages, default=str)) // 4
+
 
 def microcompact(messages: list):
     indices = []
@@ -239,6 +262,7 @@ def microcompact(messages: list):
     for part in indices[:-3]:
         if isinstance(part.get("content"), str) and len(part["content"]) > 100:
             part["content"] = "[cleared]"
+
 
 def auto_compact(messages: list) -> list:
     TRANSCRIPT_DIR.mkdir(exist_ok=True)
@@ -259,6 +283,8 @@ def auto_compact(messages: list) -> list:
 
 
 # === SECTION: file_tasks (s07) ===
+
+
 class TaskManager:
     def __init__(self):
         TASKS_DIR.mkdir(exist_ok=True)
@@ -269,7 +295,8 @@ class TaskManager:
 
     def _load(self, tid: int) -> dict:
         p = TASKS_DIR / f"task_{tid}.json"
-        if not p.exists(): raise ValueError(f"Task {tid} not found")
+        if not p.exists():
+            raise ValueError(f"Task {tid} not found")
         return json.loads(p.read_text())
 
     def _save(self, task: dict):
@@ -307,7 +334,8 @@ class TaskManager:
 
     def list_all(self) -> str:
         tasks = [json.loads(f.read_text()) for f in sorted(TASKS_DIR.glob("task_*.json"))]
-        if not tasks: return "No tasks."
+        if not tasks:
+            return "No tasks."
         lines = []
         for t in tasks:
             m = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}.get(t["status"], "[?]")
@@ -325,6 +353,8 @@ class TaskManager:
 
 
 # === SECTION: background (s08) ===
+
+
 class BackgroundManager:
     def __init__(self):
         self.tasks = {}
@@ -361,6 +391,8 @@ class BackgroundManager:
 
 
 # === SECTION: messaging (s09) ===
+
+
 class MessageBus:
     def __init__(self):
         INBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -369,15 +401,17 @@ class MessageBus:
              msg_type: str = "message", extra: dict = None) -> str:
         msg = {"type": msg_type, "from": sender, "content": content,
                "timestamp": time.time()}
-        if extra: msg.update(extra)
+        if extra:
+            msg.update(extra)
         with open(INBOX_DIR / f"{to}.jsonl", "a") as f:
             f.write(json.dumps(msg) + "\n")
         return f"Sent {msg_type} to {to}"
 
     def read_inbox(self, name: str) -> list:
         path = INBOX_DIR / f"{name}.jsonl"
-        if not path.exists(): return []
-        msgs = [json.loads(l) for l in path.read_text().strip().splitlines() if l]
+        if not path.exists():
+            return []
+        msgs = [json.loads(line) for line in path.read_text().strip().splitlines() if line]
         path.write_text("")
         return msgs
 
@@ -396,6 +430,8 @@ plan_requests = {}
 
 
 # === SECTION: team (s09/s11) ===
+
+
 class TeammateManager:
     def __init__(self, bus: MessageBus, task_mgr: TaskManager):
         TEAM_DIR.mkdir(exist_ok=True)
@@ -415,7 +451,8 @@ class TeammateManager:
 
     def _find(self, name: str) -> dict:
         for m in self.config["members"]:
-            if m["name"] == name: return m
+            if m["name"] == name:
+                return m
         return None
 
     def spawn(self, name: str, role: str, prompt: str) -> str:
@@ -518,10 +555,10 @@ class TeammateManager:
                     # Identity re-injection for compressed contexts
                     if len(messages) <= 3:
                         messages.insert(0, {"role": "user", "content":
-                            f"<identity>You are '{name}', role: {role}, team: {team_name}.</identity>"})
+                                            f"<identity>You are '{name}', role: {role}, team: {team_name}.</identity>"})
                         messages.insert(1, {"role": "assistant", "content": f"I am {name}. Continuing."})
                     messages.append({"role": "user", "content":
-                        f"<auto-claimed>Task #{task['id']}: {task['subject']}\n{task.get('description', '')}</auto-claimed>"})
+                                     f"<auto-claimed>Task #{task['id']}: {task['subject']}\n{task.get('description', '')}</auto-claimed>"})
                     messages.append({"role": "assistant", "content": f"Claimed task #{task['id']}. Working on it."})
                     resume = True
                     break
@@ -531,7 +568,8 @@ class TeammateManager:
             self._set_status(name, "working")
 
     def list_all(self) -> str:
-        if not self.config["members"]: return "No teammates."
+        if not self.config["members"]:
+            return "No teammates."
         lines = [f"Team: {self.config['team_name']}"]
         for m in self.config["members"]:
             lines.append(f"  {m['name']} ({m['role']}): {m['status']}")
@@ -557,6 +595,8 @@ Skills: {SKILLS.descriptions()}"""
 
 
 # === SECTION: shutdown_protocol (s10) ===
+
+
 def handle_shutdown_request(teammate: str) -> str:
     req_id = str(uuid.uuid4())[:8]
     shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
@@ -564,9 +604,12 @@ def handle_shutdown_request(teammate: str) -> str:
     return f"Shutdown request {req_id} sent to '{teammate}'"
 
 # === SECTION: plan_approval (s10) ===
+
+
 def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> str:
     req = plan_requests.get(request_id)
-    if not req: return f"Error: Unknown plan request_id '{request_id}'"
+    if not req:
+        return f"Error: Unknown plan request_id '{request_id}'"
     req["status"] = "approved" if approve else "rejected"
     BUS.send("lead", req["from"], feedback, "plan_approval_response",
              {"request_id": request_id, "approve": approve, "feedback": feedback})
@@ -651,6 +694,8 @@ TOOLS = [
 
 
 # === SECTION: agent_loop ===
+
+
 def agent_loop(messages: list):
     rounds_without_todo = 0
     while True:
