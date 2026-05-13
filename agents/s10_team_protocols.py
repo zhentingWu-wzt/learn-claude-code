@@ -81,7 +81,13 @@ VALID_MSG_TYPES = {
 # -- Request trackers: correlate by request_id --
 shutdown_requests = {}
 plan_requests = {}
+plan_approvals = {}
+plan_requirements = {}
 _tracker_lock = threading.Lock()
+
+RISKY_PLAN_KEYWORDS = ("risky", "refactor", "refactoring", "major", "rewrite")
+PLAN_GATED_TOOLS = {"write_file", "edit_file"}
+STRICT_PLAN_GATED_TOOLS = {"bash", "write_file", "edit_file"}
 
 
 # -- MessageBus: JSONL inbox per teammate --
@@ -130,6 +136,109 @@ class MessageBus:
 BUS = MessageBus(INBOX_DIR)
 
 
+def _block_attr(block, key: str, default=None):
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _normalize_assistant_content(content: list) -> list:
+    normalized = []
+    for block in content:
+        block_type = _block_attr(block, "type")
+        if block_type == "text":
+            normalized.append({"type": "text", "text": _block_attr(block, "text", "")})
+        elif block_type == "tool_use":
+            normalized.append({
+                "type": "tool_use",
+                "id": _block_attr(block, "id"),
+                "name": _block_attr(block, "name"),
+                "input": _block_attr(block, "input", {}),
+            })
+    return normalized
+
+
+def _assistant_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    parts = []
+    for block in content:
+        if _block_attr(block, "type") == "text":
+            text = _block_attr(block, "text", "")
+            if text:
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _is_tool_use_message(message: dict) -> bool:
+    if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+        return False
+    return any(_block_attr(block, "type") == "tool_use" for block in message["content"])
+
+
+def _is_tool_result_message(message: dict) -> bool:
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list) or not content:
+        return False
+    return all(_block_attr(block, "type") == "tool_result" for block in content)
+
+
+def _summarize_tool_pair(assistant_msg: dict, user_msg: dict) -> str:
+    calls = []
+    for block in assistant_msg["content"]:
+        if _block_attr(block, "type") == "tool_use":
+            name = _block_attr(block, "name", "unknown_tool")
+            tool_input = _block_attr(block, "input", {})
+            calls.append(f"{name}({json.dumps(tool_input, ensure_ascii=True)})")
+    results = []
+    for block in user_msg["content"]:
+        content = _block_attr(block, "content", "")
+        results.append(str(content)[:200])
+    calls_text = "; ".join(calls) or "no tool calls"
+    results_text = " | ".join(results) or "no tool results"
+    return f"<tool_round>Calls: {calls_text}\nResults: {results_text}</tool_round>"
+
+
+def _compact_messages(messages: list, keep_recent_tool_pairs: int = 1):
+    pair_starts = []
+    i = 0
+    while i < len(messages) - 1:
+        if _is_tool_use_message(messages[i]) and _is_tool_result_message(messages[i + 1]):
+            pair_starts.append(i)
+            i += 2
+        else:
+            i += 1
+    if len(pair_starts) <= keep_recent_tool_pairs:
+        return
+
+    keep_starts = set(pair_starts[-keep_recent_tool_pairs:])
+    compacted = []
+    i = 0
+    while i < len(messages):
+        if i in pair_starts:
+            if i in keep_starts:
+                compacted.extend([messages[i], messages[i + 1]])
+            else:
+                compacted.append({
+                    "role": "user",
+                    "content": _summarize_tool_pair(messages[i], messages[i + 1]),
+                })
+            i += 2
+            continue
+
+        message = messages[i]
+        if message.get("role") == "assistant":
+            text = _assistant_text(message.get("content"))
+            if text:
+                compacted.append({"role": "assistant", "content": text})
+        else:
+            compacted.append(message)
+        i += 1
+    messages[:] = compacted
+
+
 # -- TeammateManager with shutdown + plan approval --
 class TeammateManager:
     def __init__(self, team_dir: Path):
@@ -153,6 +262,34 @@ class TeammateManager:
                 return m
         return None
 
+    def _approval_state(self, name: str) -> str:
+        with _tracker_lock:
+            return plan_approvals.get(name, "not_required")
+
+    def _requires_plan(self, prompt: str) -> bool:
+        lowered = prompt.lower()
+        return any(keyword in lowered for keyword in RISKY_PLAN_KEYWORDS)
+
+    def _can_execute_tool(self, name: str, tool_name: str) -> tuple[bool, str]:
+        with _tracker_lock:
+            required = plan_requirements.get(name, False)
+            state = plan_approvals.get(name, "not_required")
+
+        if tool_name == "plan_approval":
+            if state == "pending":
+                return False, "Plan approval already pending. Wait for lead response."
+            return True, ""
+
+        if not required:
+            return True, ""
+
+        gated_tools = STRICT_PLAN_GATED_TOOLS if state == "not_required" else PLAN_GATED_TOOLS
+        if tool_name in gated_tools and state != "approved":
+            if state == "pending":
+                return False, "Plan approval pending. Wait before taking action."
+            return False, "Plan approval required before using this tool."
+        return True, ""
+
     def spawn(self, name: str, role: str, prompt: str) -> str:
         member = self._find_member(name)
         if member:
@@ -164,6 +301,10 @@ class TeammateManager:
             member = {"name": name, "role": role, "status": "working"}
             self.config["members"].append(member)
         self._save_config()
+        with _tracker_lock:
+            required = self._requires_plan(prompt)
+            plan_requirements[name] = required
+            plan_approvals[name] = "not_required" if not required else "not_required"
         thread = threading.Thread(
             target=self._teammate_loop,
             args=(name, role, prompt),
@@ -174,9 +315,10 @@ class TeammateManager:
         return f"Spawned '{name}' (role: {role})"
 
     def _teammate_loop(self, name: str, role: str, prompt: str):
+        plan_required = self._requires_plan(prompt)
         sys_prompt = (
             f"You are '{name}', role: {role}, at {WORKDIR}. "
-            f"Submit plans via plan_approval before major work. "
+            f"{'You must submit a plan via plan_approval and wait for approval before taking risky actions. ' if plan_required else 'Submit plans via plan_approval before major work. '}"
             f"Respond to shutdown_request with shutdown_response."
         )
         messages = [{"role": "user", "content": prompt}]
@@ -198,7 +340,7 @@ class TeammateManager:
                 )
             except Exception:
                 break
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": _normalize_assistant_content(response.content)})
             if response.stop_reason != "tool_use":
                 break
             results = []
@@ -214,12 +356,19 @@ class TeammateManager:
                     if block.name == "shutdown_response" and block.input.get("approve"):
                         should_exit = True
             messages.append({"role": "user", "content": results})
+            _compact_messages(messages)
         member = self._find_member(name)
         if member:
             member["status"] = "shutdown" if should_exit else "idle"
             self._save_config()
+        with _tracker_lock:
+            plan_requirements.pop(name, None)
+            plan_approvals.pop(name, None)
 
     def _exec(self, sender: str, tool_name: str, args: dict) -> str:
+        allowed, reason = self._can_execute_tool(sender, tool_name)
+        if not allowed:
+            return f"Blocked: {reason}"
         # these base tools are unchanged from s02
         if tool_name == "bash":
             return _run_bash(args["command"])
@@ -249,6 +398,7 @@ class TeammateManager:
             req_id = str(uuid.uuid4())[:8]
             with _tracker_lock:
                 plan_requests[req_id] = {"from": sender, "plan": plan_text, "status": "pending"}
+                plan_approvals[sender] = "pending"
             BUS.send(
                 sender, "lead", plan_text, "plan_approval_response",
                 {"request_id": req_id, "plan": plan_text},
@@ -366,6 +516,7 @@ def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> st
         return f"Error: Unknown plan request_id '{request_id}'"
     with _tracker_lock:
         req["status"] = "approved" if approve else "rejected"
+        plan_approvals[req["from"]] = "approved" if approve else "rejected"
     BUS.send(
         "lead", req["from"], feedback, "plan_approval_response",
         {"request_id": request_id, "approve": approve, "feedback": feedback},
@@ -431,14 +582,21 @@ def agent_loop(messages: list):
                 "role": "user",
                 "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>",
             })
-        response = client.messages.create(
-            model=MODEL,
-            system=SYSTEM,
-            messages=messages,
-            tools=TOOLS,
-            max_tokens=8000,
-        )
-        messages.append({"role": "assistant", "content": response.content})
+        try:
+            response = client.messages.create(
+                model=MODEL,
+                system=SYSTEM,
+                messages=messages,
+                tools=TOOLS,
+                max_tokens=8000,
+            )
+        except Exception as e:
+            messages.append({
+                "role": "assistant",
+                "content": f"Error calling model API: {e}",
+            })
+            return
+        messages.append({"role": "assistant", "content": _normalize_assistant_content(response.content)})
         if response.stop_reason != "tool_use":
             return
         results = []
@@ -457,6 +615,7 @@ def agent_loop(messages: list):
                     "content": str(output),
                 })
         messages.append({"role": "user", "content": results})
+        _compact_messages(messages)
 
 
 if __name__ == "__main__":

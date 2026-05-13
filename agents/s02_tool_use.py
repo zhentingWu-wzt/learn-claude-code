@@ -58,7 +58,7 @@ def run_bash(command: str) -> str:
         return "Error: Timeout (120s)"
 
 
-def run_read(path: str, limit: int = None) -> str:
+def run_read(path: str, limit: int ) -> str:
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()

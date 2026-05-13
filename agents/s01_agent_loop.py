@@ -82,7 +82,7 @@ def agent_loop(messages: list):
     while True:
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+            tools=TOOLS, max_tokens=8000, #type: ignore
         )
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
@@ -94,7 +94,7 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type == "tool_use":
                 print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
+                output = run_bash(block.input["command"]) #type: ignore
                 print(output[:200])
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": output})
