@@ -11,43 +11,47 @@ import { VERSION_META, VERSION_ORDER, LEARNING_PATH } from "../src/lib/constants
 // Resolve paths relative to this script's location (web/scripts/)
 const WEB_DIR = path.resolve(__dirname, "..");
 const REPO_ROOT = path.resolve(WEB_DIR, "..");
-const AGENTS_DIR = path.join(REPO_ROOT, "agents");
+const AGENTS_DIR = path.join(REPO_ROOT, "agents-rs");
 const DOCS_DIR = path.join(REPO_ROOT, "docs");
 const OUT_DIR = path.join(WEB_DIR, "src", "data", "generated");
 
-// Map python filenames to version IDs
-// s01_agent_loop.py -> s01
-// s02_tools.py -> s02
-// s_full.py -> s_full (reference agent, typically skipped)
-function filenameToVersionId(filename: string): string | null {
-  const base = path.basename(filename, ".py");
-  if (base === "s_full") return null;
-  if (base === "__init__") return null;
+// Map Rust directory names to version IDs
+// s01_agent_loop/src/main.rs -> s01
+// s02_tool_use/src/main.rs -> s02
+// s_full/src/main.rs -> s_full (reference agent, typically skipped)
+function filenameToVersionId(dirName: string): string | null {
+  if (dirName === "s_full") return null;
+  if (dirName === "harness") return null;
+  if (dirName === "target") return null;
 
-  const match = base.match(/^(s\d+[a-c]?)_/);
+  const match = dirName.match(/^(s\d+[a-c]?)_/);
   if (!match) return null;
   return match[1];
 }
 
-// Extract classes from Python source
+// Extract structs/enums from Rust source
 function extractClasses(
   lines: string[]
 ): { name: string; startLine: number; endLine: number }[] {
   const classes: { name: string; startLine: number; endLine: number }[] = [];
-  const classPattern = /^class\s+(\w+)/;
+  const structPattern = /^(?:pub\s+)?struct\s+(\w+)/;
+  const enumPattern = /^(?:pub\s+)?enum\s+(\w+)/;
 
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(classPattern);
+    const m = lines[i].match(structPattern) || lines[i].match(enumPattern);
     if (m) {
       const name = m[1];
       const startLine = i + 1;
-      // Find end of class: next class/function at indent 0, or EOF
+      // Find end: next item at indent 0, or EOF
       let endLine = lines.length;
       for (let j = i + 1; j < lines.length; j++) {
         if (
-          lines[j].match(/^class\s/) ||
-          lines[j].match(/^def\s/) ||
-          (lines[j].match(/^\S/) && lines[j].trim() !== "" && !lines[j].startsWith("#") && !lines[j].startsWith("@"))
+          lines[j].match(/^(?:pub\s+)?struct\s/) ||
+          lines[j].match(/^(?:pub\s+)?enum\s/) ||
+          lines[j].match(/^(?:pub\s+)?fn\s/) ||
+          lines[j].match(/^impl\s/) ||
+          lines[j].match(/^\/\/!\s/) ||
+          (lines[j].match(/^\S/) && lines[j].trim() !== "" && !lines[j].startsWith("//") && !lines[j].startsWith("#"))
         ) {
           endLine = j;
           break;
@@ -59,19 +63,20 @@ function extractClasses(
   return classes;
 }
 
-// Extract top-level functions from Python source
+// Extract top-level functions from Rust source
 function extractFunctions(
   lines: string[]
 ): { name: string; signature: string; startLine: number }[] {
   const functions: { name: string; signature: string; startLine: number }[] = [];
-  const funcPattern = /^def\s+(\w+)\((.*?)\)/;
+  const funcPattern = /^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\((.*?)\)/;
 
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(funcPattern);
     if (m) {
+      const prefix = lines[i].match(/^(pub\s+)?(async\s+)?fn\s/)?.[0] || "fn ";
       functions.push({
         name: m[1],
-        signature: `def ${m[1]}(${m[2]})`,
+        signature: `${prefix}${m[1]}(${m[2]})`,
         startLine: i + 1,
       });
     }
@@ -79,23 +84,43 @@ function extractFunctions(
   return functions;
 }
 
-// Extract tool names from Python source
-// Looks for "name": "tool_name" patterns in dict literals
+// Extract tool names from Rust source
+// Looks for "name": "tool_name", name: "...".into(), or name: "...".to_string() patterns
 function extractTools(source: string): string[] {
-  const toolPattern = /"name"\s*:\s*"(\w+)"/g;
   const tools = new Set<string>();
   let m;
-  while ((m = toolPattern.exec(source)) !== null) {
+  // JSON-style: "name": "tool_name"
+  const jsonPattern = /"name"\s*:\s*"(\w+)"/g;
+  while ((m = jsonPattern.exec(source)) !== null) {
     tools.add(m[1]);
+  }
+  // Rust struct field: name: "tool_name".into()
+  const intoPattern = /name:\s*"(\w+)"\.into\(\)/g;
+  while ((m = intoPattern.exec(source)) !== null) {
+    tools.add(m[1]);
+  }
+  // Rust struct field: name: "tool_name".to_string()
+  const toStringPattern = /name:\s*"(\w+)"\.to_string\(\)/g;
+  while ((m = toStringPattern.exec(source)) !== null) {
+    tools.add(m[1]);
+  }
+  // Dispatch match arms: "tool_name" =>
+  const dispatchPattern = /"(\w+)"\s*=>/g;
+  while ((m = dispatchPattern.exec(source)) !== null) {
+    // Filter out non-tool keywords
+    const name = m[1];
+    if (!["true", "false", "Some", "None", "Ok", "Err"].includes(name)) {
+      tools.add(name);
+    }
   }
   return Array.from(tools);
 }
 
-// Count non-blank, non-comment lines
+// Count non-blank, non-comment lines (Rust // comments)
 function countLoc(lines: string[]): number {
   return lines.filter((line) => {
     const trimmed = line.trim();
-    return trimmed !== "" && !trimmed.startsWith("#");
+    return trimmed !== "" && !trimmed.startsWith("//");
   }).length;
 }
 
@@ -130,24 +155,29 @@ function main() {
     return;
   }
 
-  // 1. Read all agent files
-  const agentFiles = fs
+  // 1. Read all agent directories (Rust workspace: sNN_name/src/main.rs)
+  const agentDirs = fs
     .readdirSync(AGENTS_DIR)
-    .filter((f) => f.startsWith("s") && f.endsWith(".py"));
+    .filter((f) => f.startsWith("s") && fs.statSync(path.join(AGENTS_DIR, f)).isDirectory());
 
-  console.log(`  Found ${agentFiles.length} agent files`);
+  console.log(`  Found ${agentDirs.length} agent directories`);
 
   const versions: AgentVersion[] = [];
 
-  for (const filename of agentFiles) {
-    const versionId = filenameToVersionId(filename);
+  for (const dirName of agentDirs) {
+    const versionId = filenameToVersionId(dirName);
     if (!versionId) {
-      console.warn(`  Skipping ${filename}: could not determine version ID`);
+      console.warn(`  Skipping ${dirName}: could not determine version ID`);
       continue;
     }
 
-    const filePath = path.join(AGENTS_DIR, filename);
-    const source = fs.readFileSync(filePath, "utf-8");
+    const mainPath = path.join(AGENTS_DIR, dirName, "src", "main.rs");
+    if (!fs.existsSync(mainPath)) {
+      console.warn(`  Skipping ${dirName}: no src/main.rs found`);
+      continue;
+    }
+
+    const source = fs.readFileSync(mainPath, "utf-8");
     const lines = source.split("\n");
 
     const meta = VERSION_META[versionId];
@@ -158,7 +188,7 @@ function main() {
 
     versions.push({
       id: versionId,
-      filename,
+      filename: `${dirName}/src/main.rs`,
       title: meta?.title ?? versionId,
       subtitle: meta?.subtitle ?? "",
       loc,

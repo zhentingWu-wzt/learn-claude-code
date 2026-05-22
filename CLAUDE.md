@@ -6,41 +6,68 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A teaching project that dissects Claude Code's architecture to demonstrate how to build AI agent harnesses. The core thesis: agency comes from model training, not code orchestration. This repo builds the "vehicle" (harness), not the "driver" (model).
 
-The project has two parts: **Python agent scripts** that progressively implement harness mechanisms, and a **Next.js web app** that visualizes and documents them.
+The project has two parts: **Rust agent binaries** that progressively implement harness mechanisms, and a **Next.js web app** that visualizes and documents them.
 
 ## Commands
 
-### Python agents
+### Rust agents
 ```bash
-# Run an agent script (requires ANTHROPIC_API_KEY and MODEL_ID in .env)
+cd agents-rs
+
+# Build all binaries
+cargo build
+
+# Run an agent (requires ANTHROPIC_API_KEY and MODEL_ID in .env)
+cargo run --bin s01_agent_loop
+cargo run --bin s02_tool_use
+# ... etc for s03 through s12
+
+# Run the full combined harness
+cargo run --bin s_full
+
+# Type check only (fast)
+cargo check
+
+# Run tests
+cargo test
+```
+
+### Python agents (legacy, still available)
+```bash
 python agents/s01_agent_loop.py
-
-# Run Python tests
-python -m pytest tests/test_agents_smoke.py -q          # smoke: verify all agent scripts compile
-python -m pytest tests/test_utils.py -q                  # mypackage.utils unit tests
-python -m pytest tests/test_s_full_background.py -q      # s_full BackgroundManager with mocked Anthropic
-
-# Run a single test by name
-python -m pytest tests/test_utils.py::TestAdd::test_add_integers -q
+python -m pytest tests/test_agents_smoke.py -q
 ```
 
 ### Web app
 ```bash
 cd web
 npm ci                    # install dependencies
-npm run extract           # extract content from agents/ and docs/ into src/data/generated/
+npm run extract           # extract content from agents-rs/ and docs/ into src/data/generated/
 npm run dev               # dev server (auto-runs extract first)
 npm run build             # production build (auto-runs extract first)
 npx tsc --noEmit          # type check only
 ```
 
-The `extract` script (`web/scripts/extract-content.ts`) reads `agents/*.py` and `docs/{en,zh,ja}/*.md`, then writes `versions.json` and `docs.json` into `web/src/data/generated/`. It runs automatically before dev/build. If `agents/` is missing (e.g. Vercel build), it falls back to pre-committed generated data.
+The `extract` script (`web/scripts/extract-content.ts`) reads `agents-rs/s*/src/main.rs` and `docs/{en,zh,ja}/*.md`, then writes `versions.json` and `docs.json` into `web/src/data/generated/`. It runs automatically before dev/build. If `agents-rs/` is missing (e.g. Vercel build), it falls back to pre-committed generated data.
 
 ## Architecture
 
-### Progressive agent implementation (agents/)
+### Rust workspace (agents-rs/)
 
-The 12 scripts build incrementally — each adds one mechanism on top of the previous:
+A Cargo workspace with 14 crates: one shared `harness` library and 13 binary crates.
+
+**harness/** — shared library crate providing:
+- `config.rs` — env/dotenv loading (ANTHROPIC_API_KEY, MODEL_ID, ANTHROPIC_BASE_URL)
+- `client.rs` — reqwest-based Anthropic API client with ContentBlock, ToolDef, message helpers
+- `tools.rs` — run_bash, run_read, run_write, run_edit with safety checks
+- `todo.rs` — TodoManager (s03)
+- `skills.rs` — SkillLoader with YAML frontmatter (s05)
+- `compact.rs` — micro_compact, auto_compact, estimate_tokens (s06)
+- `tasks.rs` — TaskManager with JSON file persistence and dependency graph (s07)
+- `messaging.rs` — MessageBus with JSONL inboxes (s09)
+- `protocols.rs` — ProtocolTracker for shutdown/plan approval (s10)
+
+**Binary crates (s01–s12 + s_full)** — each progressively adds one mechanism:
 
 | Layer | Scripts | What's added |
 |-------|---------|-------------|
@@ -50,17 +77,18 @@ The 12 scripts build incrementally — each adds one mechanism on top of the pre
 | **Concurrency** | `s08` | Background task threads + notification queue |
 | **Collaboration** | `s09` → `s12` | Team mailboxes, request-response protocols, autonomous task claiming, worktree directory isolation |
 
-`s_full.py` combines all mechanisms into one complete harness.
+`s_full` combines all mechanisms into one complete harness.
 
-Key patterns across all scripts:
-- All use `anthropic` SDK with the same bootstrap: `load_dotenv`, optional `ANTHROPIC_BASE_URL` override, `MODEL_ID` from env
-- All share the same tool safety model: dangerous command blocklist, 120s timeout, 50000-char output truncation, path traversal protection via `is_relative_to()`
-- Subagents (`s04+`) spawn with `messages=[]` and filtered tools (no recursive `task` tool)
+Key patterns across all binaries:
+- All use `reqwest`-based AnthropicClient with optional `ANTHROPIC_BASE_URL` override and `MODEL_ID` from env
+- All share the same tool safety model: dangerous command blocklist, 120s timeout, 50000-char output truncation, path traversal protection
+- Subagents (`s04+`) spawn with fresh `messages[]` and filtered tools (no recursive `task` tool)
 - Team agents (`s09+`) communicate through `.team/inbox/` JSONL mailbox files
+- All agent loops are async (`tokio::spawn` for background tasks, `Arc<Mutex<...>>` for shared state)
 
 ### Web app (web/)
 
-Next.js 16 + React 19 + Tailwind 4. Content pipeline: `agents/*.py` → `extract-content.ts` → `src/data/generated/{versions.json,docs.json}` → React components.
+Next.js 16 + React 19 + Tailwind 4. Content pipeline: `agents-rs/s*/src/main.rs` → `extract-content.ts` → `src/data/generated/{versions.json,docs.json}` → React components.
 
 Key directories:
 - `src/components/visualizations/` — one interactive visualization per scenario (s01–s12)
@@ -72,7 +100,7 @@ Key directories:
 - `src/lib/constants.ts` — `VERSION_ORDER`, `VERSION_META` (titles, layers, insights), `LAYERS` — the single source of truth for scenario metadata
 - `src/lib/i18n.tsx` / `src/lib/i18n-server.ts` — client/server i18n
 
-Scenario version metadata is defined in `web/src/lib/constants.ts` (`VERSION_META`). If you add or rename an agent script, update both the filename convention (must match `s\d+[a-c]?_*`) and `VERSION_META`.
+Scenario version metadata is defined in `web/src/lib/constants.ts` (`VERSION_META`). If you add or rename an agent crate, update both the directory name convention (must match `s\d+[a-c]?_*`) and `VERSION_META`.
 
 ### Multi-provider support
 
@@ -96,4 +124,4 @@ Two GitHub Actions workflows:
 - `.github/workflows/ci.yml` — web build (npm ci → tsc --noEmit → next build)
 - `.github/workflows/test.yml` — Python smoke tests (pytest on test_agents_smoke.py) + web build
 
-Python 3.11, Node 20.
+Python 3.11, Node 20, Rust latest stable.
